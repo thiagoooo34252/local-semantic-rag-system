@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-import tiktoken
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -26,6 +25,18 @@ from tests.fakes import DeterministicFakeEmbeddings
 
 COLLECTION = "test_collection"
 MODEL = "fake-embedding-v1"
+
+
+class DeterministicByteEncoding:
+    @staticmethod
+    def encode(text: str, *, disallowed_special: object = "all") -> list[int]:
+        return list(text.encode("utf-8"))
+
+
+@pytest.fixture(autouse=True)
+def use_deterministic_token_encoding(monkeypatch: pytest.MonkeyPatch) -> None:
+    encoding = DeterministicByteEncoding()
+    monkeypatch.setattr(ingest, "_get_encoding", lambda: encoding)
 
 
 class FailingDocumentEmbeddings(DeterministicFakeEmbeddings):
@@ -143,7 +154,7 @@ def test_safety_resplit_handles_token_recombination_overshoot() -> None:
     )
 
     chunks = _split_text_safely(splitter, text)
-    encoding = tiktoken.get_encoding("cl100k_base")
+    encoding = ingest._get_encoding()
     first_tokens = encoding.encode(chunks[0], disallowed_special=())
     second_tokens = encoding.encode(f" {chunks[1]}", disallowed_special=())
     overlaps = [

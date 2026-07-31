@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    env:
+      ANONYMIZED_TELEMETRY: "FALSE"
+      OPENAI_API_KEY: ""
+      PYTHON_DOTENV_DISABLED: "1"
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Configurar uv y Python 3.12
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Verificar el lockfile
+        run: uv lock --check
+
+      - name: Instalar dependencias bloqueadas
+        run: uv sync --locked --all-groups
+
+      - name: Verificar formato
+        run: uv run ruff format --check .
+
+      - name: Ejecutar lint
+        run: uv run ruff check .
+
+      - name: Verificar tipos
+        run: uv run pyright
+
+      - name: Ejecutar pruebas y cobertura de ramas
+        run: >-
+          uv run pytest
+          -W error::DeprecationWarning
+          -W error::PendingDeprecationWarning
+          --cov --cov-branch --cov-report=term-missing --cov-fail-under=90
+
+      - name: Construir wheel y sdist
+        run: uv build
+
+      - name: Buscar patrones de secretos
+        run: |
+          if git grep -nEI '(sk-proj-[A-Za-z0-9_-]{40,}|sk-[A-Za-z0-9]{40,}|gh[pousr]_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16})' -- ':!uv.lock'; then
+            echo "Se detectó un posible secreto." >&2
+            exit 1
+          fi
+
+      - name: Verificar espacios y conflictos de parche
+        run: git diff --check

@@ -1,0 +1,7 @@
+include .env.example
+include LICENSE
+include README.md
+include uv.lock
+recursive-include .github *.yml
+recursive-include data *.md *.txt
+recursive-include tests *.py

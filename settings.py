@@ -13,6 +13,7 @@ DEFAULT_COLLECTION_NAME = "local_semantic_rag"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 DEFAULT_CHAT_MODEL = "gpt-4o-mini"
 DEFAULT_TOP_K = 4
+SUPPORTED_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 
 
 def load_project_environment() -> None:
@@ -29,6 +30,19 @@ def get_embedding_model() -> str:
 def get_chat_model() -> str:
     """Devuelve el modelo de chat configurado."""
     return os.getenv("OPENAI_CHAT_MODEL", DEFAULT_CHAT_MODEL).strip()
+
+
+def get_reasoning_effort() -> str | None:
+    """Devuelve y valida el esfuerzo de razonamiento opcional."""
+    reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "").strip()
+    if not reasoning_effort:
+        return None
+    if reasoning_effort not in SUPPORTED_REASONING_EFFORTS:
+        supported_values = ", ".join(SUPPORTED_REASONING_EFFORTS)
+        raise ValueError(
+            f"OPENAI_REASONING_EFFORT debe ser uno de: {supported_values}."
+        )
+    return reasoning_effort
 
 
 def get_persist_path() -> Path:

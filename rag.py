@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,6 +26,7 @@ from settings import (
     get_collection_name,
     get_embedding_model,
     get_persist_path,
+    get_reasoning_effort,
     get_top_k,
     load_project_environment,
     require_openai_api_key,
@@ -58,6 +62,49 @@ Pregunta: {query}
 
 class GroundingError(ValueError):
     """Indica que una salida no cumple el contrato de fundamentación."""
+
+
+# Estos eventos describen límites operativos completados, no razonamiento privado.
+class RagPhase(StrEnum):
+    """Fases observables que corresponden a ejecución real del pipeline."""
+
+    LOCAL_RETRIEVAL = "local_retrieval"
+    GROUNDED_GENERATION_AND_PARSING = "grounded_generation_and_parsing"
+    REFERENCE_VALIDATION = "reference_validation"
+
+
+@dataclass(frozen=True, slots=True)
+class RagProgressEvent:
+    """Evento emitido después de completar una fase operacional."""
+
+    phase: RagPhase
+    elapsed_seconds: float
+
+
+ProgressCallback = Callable[[RagProgressEvent], None]
+Clock = Callable[[], float]
+
+
+def _phase_started(
+    progress_callback: ProgressCallback | None, clock: Clock
+) -> float | None:
+    return clock() if progress_callback is not None else None
+
+
+def _report_completed_phase(
+    progress_callback: ProgressCallback | None,
+    phase: RagPhase,
+    started_at: float | None,
+    clock: Clock,
+) -> None:
+    if progress_callback is None or started_at is None:
+        return
+    progress_callback(
+        RagProgressEvent(
+            phase=phase,
+            elapsed_seconds=max(0.0, clock() - started_at),
+        )
+    )
 
 
 def validate_top_k(top_k: int) -> int:
@@ -104,6 +151,8 @@ def _build_rag_pipeline(
     *,
     retriever: Runnable[str, list[Document]],
     model: Runnable[Any, Any],
+    progress_callback: ProgressCallback | None = None,
+    clock: Clock = time.monotonic,
 ) -> Runnable[dict[str, str], RagResponse]:
     parser = PydanticOutputParser(pydantic_object=RagResponse)
     prompt = ChatPromptTemplate.from_messages(
@@ -111,7 +160,15 @@ def _build_rag_pipeline(
     ).partial(format_instructions=parser.get_format_instructions())
 
     async def retrieve(payload: dict[str, Any]) -> list[Document]:
-        return await retriever.ainvoke(str(payload["query"]))
+        started_at = _phase_started(progress_callback, clock)
+        documents = await retriever.ainvoke(str(payload["query"]))
+        _report_completed_phase(
+            progress_callback,
+            RagPhase.LOCAL_RETRIEVAL,
+            started_at,
+            clock,
+        )
+        return documents
 
     def prepare_context(payload: dict[str, Any]) -> str:
         return format_context(_documents_from_payload(payload))
@@ -121,7 +178,25 @@ def _build_rag_pipeline(
             allowed_sources(_documents_from_payload(payload)), ensure_ascii=False
         )
 
-    def validate_grounding(payload: dict[str, Any]) -> RagResponse:
+    async def start_generation(_payload: dict[str, Any]) -> float | None:
+        return _phase_started(progress_callback, clock)
+
+    async def report_completed_generation(
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        started_at = payload.get("generation_started_at")
+        if started_at is not None and not isinstance(started_at, (int, float)):
+            raise TypeError("El inicio de generación no es válido.")
+        _report_completed_phase(
+            progress_callback,
+            RagPhase.GROUNDED_GENERATION_AND_PARSING,
+            float(started_at) if started_at is not None else None,
+            clock,
+        )
+        return payload
+
+    async def validate_grounding(payload: dict[str, Any]) -> RagResponse:
+        started_at = _phase_started(progress_callback, clock)
         response = payload.get("response")
         if not isinstance(response, RagResponse):
             raise GroundingError("El modelo no produjo una respuesta RAG válida.")
@@ -135,11 +210,23 @@ def _build_rag_pipeline(
             raise GroundingError(
                 "Una respuesta informativa debe citar al menos una fuente."
             )
+        _report_completed_phase(
+            progress_callback,
+            RagPhase.REFERENCE_VALIDATION,
+            started_at,
+            clock,
+        )
         return response
 
     retrieval_step = RunnableLambda(retrieve, name="retrieve_documents")
     context_step = RunnableLambda(prepare_context, name="format_retrieved_documents")
     source_step = RunnableLambda(prepare_sources, name="prepare_allowed_sources")
+    generation_start_step = RunnableLambda(
+        start_generation, name="start_grounded_generation"
+    )
+    generation_completed_step = RunnableLambda(
+        report_completed_generation, name="report_grounded_generation"
+    )
     validation_step = RunnableLambda(validate_grounding, name="validate_references")
 
     prepared = RunnablePassthrough.assign(documents=retrieval_step) | (
@@ -149,7 +236,15 @@ def _build_rag_pipeline(
         )
     )
     generation = prompt | model | parser
-    return prepared | RunnablePassthrough.assign(response=generation) | validation_step
+    timed_prepared = prepared | RunnablePassthrough.assign(
+        generation_started_at=generation_start_step
+    )
+    return (
+        timed_prepared
+        | RunnablePassthrough.assign(response=generation)
+        | generation_completed_step
+        | validation_step
+    )
 
 
 def _collection_size(vector_store: Chroma) -> int:
@@ -166,6 +261,8 @@ async def _get_rag_response(
     embeddings: Embeddings | None = None,
     retriever: Runnable[str, list[Document]] | None = None,
     model: Runnable[Any, Any] | None = None,
+    progress_callback: ProgressCallback | None = None,
+    clock: Clock = time.monotonic,
 ) -> RagResponse:
     normalized_query = query.strip()
     if not normalized_query:
@@ -199,12 +296,26 @@ async def _get_rag_response(
 
     if model is None:
         require_openai_api_key()
+        chat_model = get_chat_model()
+        reasoning_effort = get_reasoning_effort()
+        if reasoning_effort is None:
+            configured_model = ChatOpenAI(model=chat_model, temperature=0)
+        else:
+            configured_model = ChatOpenAI(
+                model=chat_model,
+                reasoning_effort=reasoning_effort,
+            )
         model = cast(
             Runnable[Any, Any],
-            ChatOpenAI(model=get_chat_model(), temperature=0),
+            configured_model,
         )
 
-    pipeline = _build_rag_pipeline(retriever=retriever, model=model)
+    pipeline = _build_rag_pipeline(
+        retriever=retriever,
+        model=model,
+        progress_callback=progress_callback,
+        clock=clock,
+    )
     return await pipeline.ainvoke({"query": normalized_query})
 
 
@@ -212,6 +323,22 @@ async def get_rag_response(query: str) -> RagResponse:
     """Recupera contexto local y genera una respuesta asíncrona fundamentada."""
     load_project_environment()
     return await _get_rag_response(query, top_k=get_top_k())
+
+
+async def get_rag_response_with_progress(
+    query: str,
+    progress_callback: ProgressCallback,
+    *,
+    clock: Clock = time.monotonic,
+) -> RagResponse:
+    """Responde como la API pública y notifica fases operacionales completadas."""
+    load_project_environment()
+    return await _get_rag_response(
+        query,
+        top_k=get_top_k(),
+        progress_callback=progress_callback,
+        clock=clock,
+    )
 
 
 def _parse_args() -> argparse.Namespace:

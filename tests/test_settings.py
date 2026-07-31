@@ -23,6 +23,34 @@ def test_environment_getters_use_configured_values(
     assert settings.get_top_k() == 5
 
 
+@pytest.mark.parametrize("configured_value", [None, "", "  \t"])
+def test_reasoning_effort_is_disabled_when_unset_or_blank(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_value: str | None,
+) -> None:
+    if configured_value is None:
+        monkeypatch.delenv("OPENAI_REASONING_EFFORT", raising=False)
+    else:
+        monkeypatch.setenv("OPENAI_REASONING_EFFORT", configured_value)
+
+    assert settings.get_reasoning_effort() is None
+
+
+def test_invalid_reasoning_effort_has_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_REASONING_EFFORT", "minimal")
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "OPENAI_REASONING_EFFORT debe ser uno de: "
+            "none, low, medium, high, xhigh, max"
+        ),
+    ):
+        settings.get_reasoning_effort()
+
+
 def test_invalid_top_k_configuration_has_clear_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

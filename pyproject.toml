@@ -30,7 +30,7 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["ingest", "models", "rag", "settings"]
+py-modules = ["chat", "ingest", "models", "rag", "settings"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
@@ -39,7 +39,7 @@ addopts = ["--strict-config", "--strict-markers"]
 
 [tool.coverage.run]
 branch = true
-source = ["ingest", "models", "rag", "settings"]
+source = ["chat", "ingest", "models", "rag", "settings"]
 
 [tool.coverage.report]
 fail_under = 90
@@ -54,7 +54,7 @@ line-length = 88
 select = ["E", "F", "I", "B", "UP", "RUF", "SIM"]
 
 [tool.pyright]
-include = ["ingest.py", "models.py", "rag.py", "settings.py", "tests"]
+include = ["chat.py", "ingest.py", "models.py", "rag.py", "settings.py", "tests"]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
 reportUnusedImport = "error"

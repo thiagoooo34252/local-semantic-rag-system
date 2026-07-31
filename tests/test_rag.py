@@ -10,7 +10,13 @@ from langchain_core.runnables import Runnable
 
 import rag
 from models import FALLBACK_ANSWER
-from rag import GroundingError, _build_rag_pipeline, _get_rag_response
+from rag import (
+    GroundingError,
+    RagPhase,
+    RagProgressEvent,
+    _build_rag_pipeline,
+    _get_rag_response,
+)
 from tests.fakes import (
     DeterministicFakeEmbeddings,
     make_model,
@@ -54,6 +60,56 @@ async def test_supported_question_returns_grounded_answer_and_valid_reference() 
     assert queries == ["¿Cuánto dura la pasarela?"]
     assert "[Fuente: senderos.md | fragmento: 2]" in prompts[0]
     assert "información no confiable" in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_emits_one_completed_event_per_real_phase_in_order() -> None:
+    clock_values = iter([10.0, 10.057, 20.0, 22.1, 30.0, 30.002])
+    events: list[RagProgressEvent] = []
+    pipeline = _build_rag_pipeline(
+        retriever=make_retriever(sample_documents()),
+        model=make_model(
+            {
+                "answer": "La Pasarela del Humedal dura 45 minutos.",
+                "references": ["senderos.md"],
+            }
+        ),
+        progress_callback=events.append,
+        clock=lambda: next(clock_values),
+    )
+
+    await pipeline.ainvoke({"query": "¿Cuánto dura la pasarela?"})
+
+    assert [event.phase for event in events] == [
+        RagPhase.LOCAL_RETRIEVAL,
+        RagPhase.GROUNDED_GENERATION_AND_PARSING,
+        RagPhase.REFERENCE_VALIDATION,
+    ]
+    assert [event.elapsed_seconds for event in events] == pytest.approx(
+        [0.057, 2.1, 0.002]
+    )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_does_not_report_failed_validation_as_completed() -> None:
+    clock_values = iter([1.0, 1.01, 2.0, 2.5, 3.0])
+    events: list[RagProgressEvent] = []
+    pipeline = _build_rag_pipeline(
+        retriever=make_retriever(sample_documents()),
+        model=make_model(
+            {"answer": "Respuesta sin respaldo.", "references": ["inventada.md"]}
+        ),
+        progress_callback=events.append,
+        clock=lambda: next(clock_values),
+    )
+
+    with pytest.raises(GroundingError, match="no fueron recuperadas"):
+        await pipeline.ainvoke({"query": "Pregunta"})
+
+    assert [event.phase for event in events] == [
+        RagPhase.LOCAL_RETRIEVAL,
+        RagPhase.GROUNDED_GENERATION_AND_PARSING,
+    ]
 
 
 @pytest.mark.asyncio
@@ -217,8 +273,23 @@ async def test_errors_never_expose_api_key(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reasoning_effort", "chat_model", "expected_chat_options"),
+    [
+        ("", "chat-publico", {"model": "chat-publico", "temperature": 0}),
+        (
+            "low",
+            "gpt-5.6-luna",
+            {"model": "gpt-5.6-luna", "reasoning_effort": "low"},
+        ),
+    ],
+)
 async def test_public_api_builds_dependencies_from_environment_without_network(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reasoning_effort: str,
+    chat_model: str,
+    expected_chat_options: dict[str, object],
 ) -> None:
     persist_path = tmp_path / "vectorstore"
     embeddings = DeterministicFakeEmbeddings()
@@ -234,14 +305,14 @@ async def test_public_api_builds_dependencies_from_environment_without_network(
     prompts: list[str] = []
     fake_model = make_source_aware_model("Respuesta pública.", prompts)
     embedding_models: list[str] = []
-    chat_models: list[str] = []
+    chat_options: list[dict[str, object]] = []
 
     def fake_embedding_factory(*, model: str) -> DeterministicFakeEmbeddings:
         embedding_models.append(model)
         return embeddings
 
-    def fake_chat_factory(*, model: str, temperature: int) -> Runnable[object, object]:
-        chat_models.append(f"{model}:{temperature}")
+    def fake_chat_factory(**options: object) -> Runnable[object, object]:
+        chat_options.append(options)
         return cast(Runnable[object, object], fake_model)
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-placeholder-for-test")
@@ -249,7 +320,8 @@ async def test_public_api_builds_dependencies_from_environment_without_network(
     monkeypatch.setenv("RAG_COLLECTION_NAME", collection)
     monkeypatch.setenv("RAG_TOP_K", "4")
     monkeypatch.setenv("OPENAI_EMBEDDING_MODEL", "embedding-publico")
-    monkeypatch.setenv("OPENAI_CHAT_MODEL", "chat-publico")
+    monkeypatch.setenv("OPENAI_CHAT_MODEL", chat_model)
+    monkeypatch.setenv("OPENAI_REASONING_EFFORT", reasoning_effort)
     monkeypatch.setattr(rag, "OpenAIEmbeddings", fake_embedding_factory)
     monkeypatch.setattr(rag, "ChatOpenAI", fake_chat_factory)
 
@@ -257,5 +329,5 @@ async def test_public_api_builds_dependencies_from_environment_without_network(
 
     assert response.answer == "Respuesta pública."
     assert embedding_models == ["embedding-publico"]
-    assert chat_models == ["chat-publico:0"]
+    assert chat_options == [expected_chat_options]
     assert prompts[0].count("[Fuente:") == 4

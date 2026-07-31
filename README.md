@@ -19,10 +19,29 @@ Edite `.env` y reemplace únicamente el marcador de `OPENAI_API_KEY`. Los modelo
 OPENAI_API_KEY=replace_with_your_openai_api_key
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 OPENAI_CHAT_MODEL=gpt-4o-mini
+OPENAI_REASONING_EFFORT=
 RAG_TOP_K=4
 RAG_PERSIST_PATH=vectorstore
 RAG_COLLECTION_NAME=local_semantic_rag
 ```
+
+`OPENAI_REASONING_EFFORT` es opcional. Déjelo vacío para conservar el comportamiento predeterminado de `gpt-4o-mini` con temperatura 0. Cuando se configura, se envía al modelo sin fijar una temperatura incompatible. Para usar GPT-5.6 con esfuerzo bajo:
+
+```dotenv
+OPENAI_CHAT_MODEL=gpt-5.6-luna
+OPENAI_REASONING_EFFORT=low
+```
+
+Los valores admitidos para GPT-5.6 son `none`, `low`, `medium`, `high`, `xhigh` y `max`. Cualquier otro valor detiene la ejecución con un error de configuración antes de crear el cliente de chat.
+
+Después de configurar la clave, ingiera los documentos e inicie el chat:
+
+```bash
+uv run python ingest.py
+uv run python chat.py
+```
+
+El chat muestra el modelo configurado, indica el esfuerzo de razonamiento solo cuando está activo y presenta cada respuesta como texto natural con sus fuentes separadas. Use `/help` o `/ayuda` para ver los controles, `/clear` o `/limpiar` para limpiar la conversación y `/exit` o `/salir` para terminar. `Ctrl+C` y `Ctrl+D` cierran la sesión sin mostrar trazas internas.
 
 ## Ingestión
 
@@ -59,7 +78,27 @@ uv run python ingest.py \
   --force
 ```
 
-## Consultas
+## Chat interactivo
+
+La experiencia recomendada es la sesión conversacional:
+
+```bash
+uv run python chat.py
+```
+
+Antes de cada respuesta se acumulan eventos operacionales completados con su duración medida mediante reloj monotónico:
+
+```text
+Activity: Local retrieval · 57ms
+Activity: Grounded generation and parsing · 2.1s
+Activity: Reference validation · 2ms
+```
+
+En una TTY estas líneas usan un tono ámbar inspirado en OpenCode; con salida redirigida o `NO_COLOR` se muestran como texto plano. Los eventos corresponden únicamente a recuperación, generación con parseo y validación reales del pipeline. No simulan streaming ni exponen razonamiento privado, cadena de pensamiento, planes o resúmenes internos del modelo.
+
+## Consultas JSON
+
+El CLI original se conserva para automatización y siempre devuelve JSON:
 
 Consulta respaldada por el dataset:
 
@@ -160,6 +199,7 @@ La CI usa Python 3.12, instalación bloqueada, Ruff, Pyright, cobertura de ramas
 
 | Ruta | Responsabilidad |
 | --- | --- |
+| `chat.py` | Chat interactivo, comandos, estado, renderizado seguro y fuentes. |
 | `ingest.py` | Carga, limpieza, fragmentación, manifiesto y persistencia Chroma. |
 | `rag.py` | Recuperación asíncrona, pipeline LCEL y CLI JSON. |
 | `models.py` | Contrato Pydantic v2 de respuesta fundamentada. |
